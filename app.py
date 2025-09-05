@@ -12,7 +12,9 @@ from langchain_pinecone import PineconeVectorStore
 from langchain.vectorstores import FAISS
 
 # Embeddings
-from langchain_huggingface import HuggingFaceEmbeddings
+#from langchain_huggingface import HuggingFaceEmbeddings
+
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # Local helpers
 from src.helper import (
