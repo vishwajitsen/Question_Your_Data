@@ -8,7 +8,6 @@ sentence-transformers==2.7.0
 
 # Vector DBs
 pinecone-client>=5.1.0
-
 faiss-cpu==1.8.0
 
 # LLM wrapper
@@ -26,5 +25,3 @@ streamlit==1.36.0
 
 # General utils
 openai==1.43.0
-pyreadline3
-#langchain_huggingface
