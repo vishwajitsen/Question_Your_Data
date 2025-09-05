@@ -26,3 +26,4 @@ streamlit==1.36.0
 # General utils
 openai==1.43.0
 pyreadline3
+langchain_huggingface
