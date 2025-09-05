@@ -1,8 +1,7 @@
-# LangChain core
-langchain==0.3.6
+# LangChain core + integrations
+langchain==0.3.7
 langchain-community==0.3.6
 langchain-pinecone==0.2.0
-langchain-huggingface==0.0.3
 
 # Embeddings
 sentence-transformers==2.7.0
