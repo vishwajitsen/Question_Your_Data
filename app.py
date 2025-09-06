@@ -130,15 +130,20 @@ rag_chain = create_retrieval_chain(retriever, qa_chain)
 # ---------------------------------------------------------------------
 # Main UI
 # ---------------------------------------------------------------------
-st.subheader("Ask questions from your documents")
+st.subheader("Ask questions")
 query = st.text_input("Ask any question about medical condition & its treatment")
 
 if st.button("Get answer") and query.strip():
     with st.spinner("Running retrieval + Mistral..."):
         try:
-            response = rag_chain.invoke({"input": query})
+            #response = rag_chain.invoke({"input": query})
+            response = rag_chain.invoke({
+    "input": f"{query}\n\nWrite a detailed answer of at least 5 paragraphs (~300 tokens)."
+})
             answer = response.get("answer") if isinstance(response, dict) else str(response)
-
+            answer = answer.strip()
+            if not answer.endswith("."):
+                answer = answer.rstrip(".,;!? ") + "."
             st.markdown("**Answer:**")
             st.write(answer)
 

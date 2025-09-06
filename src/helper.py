@@ -18,6 +18,7 @@ def load_mistral_model(model_path: str):
         n_batch=256,                # keep lower for stability on Windows
         temperature=0.6,
         max_tokens=1024,
+        min_tokens=250,
         f16_kv=True,                # ✅ required for quantized gguf models
         use_mlock=True,             # ✅ prevents swapping to disk
         verbose=True,
