@@ -1,0 +1,8 @@
+streamlit
+langchain
+langchain-ollama
+sentence-transformers
+faiss-cpu
+PyPDF2
+pathlib
+pypdf
