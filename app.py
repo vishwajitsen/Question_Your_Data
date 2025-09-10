@@ -5,6 +5,7 @@ from typing import List, Dict, Any
 
 import streamlit as st
 import PyPDF2
+import torch
 
 from langchain.schema import Document
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -31,7 +32,6 @@ OLLAMA_TEMPERATURE = 0.0
 
 os.makedirs(DOCS_DIR, exist_ok=True)
 os.makedirs(INDEX_DIR, exist_ok=True)
-
 
 # ---------------- PDF utils ----------------
 def extract_text_from_pdf(path: str) -> str:
@@ -66,10 +66,14 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
             start = 0
     return chunks
 
+# ---------------- Embeddings ----------------
+def get_embeddings() -> SentenceTransformerEmbeddings:
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL, model_kwargs={"device": device})
 
 # ---------------- Indexing ----------------
 def build_faiss_index() -> FAISS:
-    embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
+    embeddings = get_embeddings()
     pdf_files = list(Path(DOCS_DIR).glob("*.pdf"))
     docs: List[Document] = []
     metadata_index: Dict[str, Any] = {}
@@ -94,7 +98,7 @@ def build_faiss_index() -> FAISS:
 
 
 def update_index_with_new_pdfs() -> FAISS:
-    embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
+    embeddings = get_embeddings()
 
     if not (os.path.exists(FAISS_INDEX_PATH) and os.path.exists(METADATA_PATH)):
         return build_faiss_index()
@@ -123,7 +127,6 @@ def update_index_with_new_pdfs() -> FAISS:
             pickle.dump(metadata_index, f)
 
     return faiss_store
-
 
 # ---------------- RAG ----------------
 def get_llm():
@@ -168,9 +171,8 @@ def ask_question(question: str, faiss_store: FAISS):
     sources = list(dict.fromkeys(sources))
     return answer, sources
 
-
 # ---------------- Streamlit UI ----------------
-st.set_page_config(page_title="📄 MiSpy RAG Assistant", layout="wide")
+st.set_page_config(page_title="📄 Medical Chatbot", layout="wide")
 
 st.title("📄 Medical Conditions Information AI Assistant APP created by Vishwajit Sen")
 st.markdown("Ask detailed questions from your PDFs. The assistant will always answer with a complete response ending with a full stop.")
@@ -193,8 +195,7 @@ if st.sidebar.button("🔄 Update Index"):
 
 # Load or build FAISS
 if os.path.exists(FAISS_INDEX_PATH):
-    embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
-    faiss_store = FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
+    faiss_store = FAISS.load_local(FAISS_INDEX_PATH, get_embeddings(), allow_dangerous_deserialization=True)
 else:
     faiss_store = build_faiss_index()
 
