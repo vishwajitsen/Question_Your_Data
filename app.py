@@ -1,162 +1,213 @@
 import os
+import pickle
+from pathlib import Path
+from typing import List, Dict, Any
+
 import streamlit as st
-from dotenv import load_dotenv
+import PyPDF2
 
-# LangChain chains
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
+from langchain.schema import Document
+from langchain.embeddings import SentenceTransformerEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
 
-# Vector store
-from langchain_community.vectorstores import FAISS
+# Ollama (Mistral) wrapper
+from langchain_ollama import ChatOllama
 
-# Embeddings
-from langchain_community.embeddings import HuggingFaceEmbeddings
+# ---------------- CONFIG ----------------
+DOCS_DIR = "uploaded_pdfs"
+INDEX_DIR = "faiss_index"
+METADATA_PATH = os.path.join(INDEX_DIR, "doc_metadata.pkl")
+FAISS_INDEX_PATH = os.path.join(INDEX_DIR, "faiss_store")
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
+TOP_K = 4
+OLLAMA_MODEL = "mistral"
+OLLAMA_TEMPERATURE = 0.0
+# ----------------------------------------
 
-# Local helpers
-from src.helper import (
-    load_pdf_file,
-    filter_to_minimal_docs,
-    text_split,
-    load_mistral_model,
-)
+os.makedirs(DOCS_DIR, exist_ok=True)
+os.makedirs(INDEX_DIR, exist_ok=True)
 
-# ---------------------------------------------------------------------
-# Environment setup
-# ---------------------------------------------------------------------
-load_dotenv()
 
-# ✅ Correct model path (Windows gguf file)
-MODEL_PATH = r"C:\Users\win11\OneDrive\Documents\MiSpy Documents\Question_Your_Data\mistral-7b-instruct-v0.1.Q4_K_M.gguf"
+# ---------------- PDF utils ----------------
+def extract_text_from_pdf(path: str) -> str:
+    text_pages = []
+    with open(path, "rb") as f:
+        reader = PyPDF2.PdfReader(f)
+        for page in reader.pages:
+            try:
+                page_text = page.extract_text()
+            except Exception:
+                page_text = None
+            if page_text:
+                text_pages.append(page_text)
+    return "\n".join(text_pages)
 
-st.set_page_config(page_title="Medical Chatbot (Streamlit)", layout="wide")
-st.title("🩺 Medical Conditions Information Chatbot. Happy Exploring")
 
-# ---------------------------------------------------------------------
-# Sidebar
-# ---------------------------------------------------------------------
-with st.sidebar:
-    st.header("Index & Data")
-    data_dir = st.text_input(
-        "PDF data directory",
-        value=r"C:\Users\win11\OneDrive\Documents\MiSpy Documents\Question_Your_Data\data",
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    length = len(text)
+    while start < length:
+        end = min(start + chunk_size, length)
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end == length:
+            break
+        start = end - overlap
+        if start < 0:
+            start = 0
+    return chunks
+
+
+# ---------------- Indexing ----------------
+def build_faiss_index() -> FAISS:
+    embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
+    pdf_files = list(Path(DOCS_DIR).glob("*.pdf"))
+    docs: List[Document] = []
+    metadata_index: Dict[str, Any] = {}
+
+    for pdf in pdf_files:
+        txt = extract_text_from_pdf(str(pdf))
+        chunks = chunk_text(txt)
+        for i, ch in enumerate(chunks):
+            md = {"source": str(pdf), "chunk": i}
+            docs.append(Document(page_content=ch, metadata=md))
+        metadata_index[str(pdf)] = {"chunks": len(chunks)}
+
+    if not docs:
+        return FAISS.from_documents([], embeddings)
+
+    faiss_store = FAISS.from_documents(docs, embeddings)
+    faiss_store.save_local(FAISS_INDEX_PATH)
+    with open(METADATA_PATH, "wb") as f:
+        pickle.dump(metadata_index, f)
+
+    return faiss_store
+
+
+def update_index_with_new_pdfs() -> FAISS:
+    embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
+
+    if not (os.path.exists(FAISS_INDEX_PATH) and os.path.exists(METADATA_PATH)):
+        return build_faiss_index()
+
+    faiss_store = FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
+    with open(METADATA_PATH, "rb") as f:
+        metadata_index = pickle.load(f)
+
+    pdf_files = list(Path(DOCS_DIR).glob("*.pdf"))
+    new_docs = []
+
+    for pdf in pdf_files:
+        if str(pdf) in metadata_index:
+            continue
+        txt = extract_text_from_pdf(str(pdf))
+        chunks = chunk_text(txt)
+        for i, ch in enumerate(chunks):
+            md = {"source": str(pdf), "chunk": i}
+            new_docs.append(Document(page_content=ch, metadata=md))
+        metadata_index[str(pdf)] = {"chunks": len(chunks)}
+
+    if new_docs:
+        faiss_store.add_documents(new_docs)
+        faiss_store.save_local(FAISS_INDEX_PATH)
+        with open(METADATA_PATH, "wb") as f:
+            pickle.dump(metadata_index, f)
+
+    return faiss_store
+
+
+# ---------------- RAG ----------------
+def get_llm():
+    return ChatOllama(model=OLLAMA_MODEL, temperature=OLLAMA_TEMPERATURE)
+
+
+PROMPT_TEMPLATE = """You are an expert assistant. Use the information from the retrieved document snippets to answer the user's question thoroughly.
+If the answer is not contained in the provided context, say you don't know rather than inventing facts.
+Always end your answer with a single full stop.
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer (detailed, complete):"""
+
+prompt = PromptTemplate(template=PROMPT_TEMPLATE, input_variables=["context", "question"])
+
+
+def create_qa_chain(faiss_store: FAISS, llm):
+    retriever = faiss_store.as_retriever(search_type="similarity", search_kwargs={"k": TOP_K})
+    qa = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=retriever,
+        return_source_documents=True,
+        chain_type_kwargs={"prompt": prompt},
     )
-    rebuild_clicked = st.button("(Re)build index from PDFs")
+    return qa
 
-# ---------------------------------------------------------------------
-# Load embeddings (force CPU)
-# ---------------------------------------------------------------------
-with st.spinner("Loading embedding model..."):
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"}  # 🚨 avoid CUDA/meta tensor issue
-    )
 
-# ---------------------------------------------------------------------
-# Load Mistral via llama.cpp wrapper
-# ---------------------------------------------------------------------
-with st.spinner("Loading Mistral 7B model..."):
-    llm = load_mistral_model(MODEL_PATH)
+def ask_question(question: str, faiss_store: FAISS):
+    llm = get_llm()
+    qa = create_qa_chain(faiss_store, llm)
+    res = qa({"query": question})
+    answer = res.get("result", "").strip()
+    if not answer.endswith("."):
+        answer += "."
+    sources = [d.metadata.get("source") for d in res.get("source_documents", []) if d.metadata.get("source")]
+    sources = list(dict.fromkeys(sources))
+    return answer, sources
 
-# ---------------------------------------------------------------------
-# FAISS loader
-# ---------------------------------------------------------------------
-def try_load_faiss_store(save_dir: str, embeddings):
-    try:
-        if os.path.exists(save_dir):
-            return FAISS.load_local(
-                save_dir,
-                embeddings,
-                allow_dangerous_deserialization=True
-            )
-        return None
-    except Exception:
-        return None
 
-# ---------------------------------------------------------------------
-# Rebuild FAISS index
-# ---------------------------------------------------------------------
-def rebuild_index_flow(data_dir, embeddings):
-    extracted = load_pdf_file(data_dir)
-    filtered = filter_to_minimal_docs(extracted)
-    chunks = text_split(filtered)
+# ---------------- Streamlit UI ----------------
+st.set_page_config(page_title="📄 MiSpy RAG Assistant", layout="wide")
 
-    faiss_dir = "faiss_index"
-    store = FAISS.from_documents(chunks, embeddings)
-    store.save_local(faiss_dir)
-    return "faiss"
+st.title("📄 Medical Conditions Information AI Assistant APP created by Vishwajit Sen")
+st.markdown("Ask detailed questions from your PDFs. The assistant will always answer with a complete response ending with a full stop.")
 
-# ---------------------------------------------------------------------
-# If user clicked rebuild
-# ---------------------------------------------------------------------
-if rebuild_clicked:
-    st.info("Starting (Re)build. This may take a while depending on PDF size.")
-    try:
-        result = rebuild_index_flow(data_dir, embeddings)
-        st.success(f"Index built successfully using {result.upper()}.")
-    except Exception as e:
-        st.error(f"Index build failed: {e}")
+# Sidebar: PDF upload
+st.sidebar.header("📂 Upload PDFs")
+uploaded_files = st.sidebar.file_uploader("Upload one or more PDFs", type=["pdf"], accept_multiple_files=True)
 
-# ---------------------------------------------------------------------
-# Load vectorstore
-# ---------------------------------------------------------------------
-docsearch = try_load_faiss_store("faiss_index", embeddings)
+if uploaded_files:
+    for uploaded_file in uploaded_files:
+        file_path = Path(DOCS_DIR) / uploaded_file.name
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+    st.sidebar.success("PDFs uploaded successfully. Click 'Update Index' to process them.")
 
-if docsearch is None:
-    st.warning("No FAISS vectorstore found. Rebuild from PDFs in the sidebar.")
-    st.stop()
+if st.sidebar.button("🔄 Update Index"):
+    with st.spinner("Updating FAISS index..."):
+        update_index_with_new_pdfs()
+    st.sidebar.success("Index updated with new PDFs!")
 
-st.success("Using vector store: FAISS")
+# Load or build FAISS
+if os.path.exists(FAISS_INDEX_PATH):
+    embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
+    faiss_store = FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
+else:
+    faiss_store = build_faiss_index()
 
-# ---------------------------------------------------------------------
-# Build retriever + chain
-# ---------------------------------------------------------------------
-retriever = docsearch.as_retriever(search_type="similarity", search_kwargs={"k": 3})
+# Query input
+st.subheader("💬 Ask a Question")
+question = st.text_input("Type your question here:")
 
-system_prompt = (
-    "You are a helpful AI assistant that answers questions based only on the provided documents.\n\n"
-    "Here are the relevant documents:\n{context}\n\n"
-    "If the information is not available in the documents, say you don’t know."
-)
+if st.button("Get Answer") and question:
+    with st.spinner("Thinking..."):
+        answer, sources = ask_question(question, faiss_store)
+    st.markdown("### 🧠 Answer")
+    st.markdown(f"{answer}")
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", system_prompt),
-    ("human", "{input}")
-])
-
-qa_chain = create_stuff_documents_chain(llm, prompt)
-rag_chain = create_retrieval_chain(retriever, qa_chain)
-
-# ---------------------------------------------------------------------
-# Main UI
-# ---------------------------------------------------------------------
-st.subheader("Ask questions")
-query = st.text_input("Ask any question about medical condition & its treatment")
-
-if st.button("Get answer") and query.strip():
-    with st.spinner("Running retrieval + Mistral..."):
-        try:
-            #response = rag_chain.invoke({"input": query})
-            response = rag_chain.invoke({
-    "input": f"{query}\n\nWrite a detailed answer of at least 5 paragraphs (~300 tokens)."
-})
-            answer = response.get("answer") if isinstance(response, dict) else str(response)
-            answer = answer.strip()
-            if not answer.endswith("."):
-                answer = answer.rstrip(".,;!? ") + "."
-            st.markdown("**Answer:**")
-            st.write(answer)
-
-           # st.markdown("**Top source documents:**")
-            #top_docs = retriever.get_relevant_documents(query)
-            #for i, d in enumerate(top_docs[:3], 1):
-                #src = d.metadata.get("source") if isinstance(d.metadata, dict) else None
-                #st.markdown(f"**{i}. Source:** {src}")
-                #snippet = d.page_content[:800].strip().replace("\n", " ")
-                #st.text(snippet + ("..." if len(snippet) > 700 else ""))
-
-        except Exception as e:
-            st.exception(e)
-
-st.markdown("---")
-st.caption("Tip: Use the sidebar to rebuild the index if you add new PDFs.")
+    if sources:
+        st.markdown("### 📌 Sources")
+        for s in sources:
+            st.markdown(f"- `{s}`")
