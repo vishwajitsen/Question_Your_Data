@@ -6,3 +6,4 @@ faiss-cpu
 PyPDF2
 pathlib
 pypdf
+langchain-community

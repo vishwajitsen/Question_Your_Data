@@ -7,8 +7,9 @@ import streamlit as st
 import PyPDF2
 
 from langchain.schema import Document
-from langchain.embeddings import SentenceTransformerEmbeddings
-from langchain.vectorstores import FAISS
+from langchain_community.embeddings import SentenceTransformerEmbeddings
+from langchain_community.vectorstores import FAISS
+
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 
